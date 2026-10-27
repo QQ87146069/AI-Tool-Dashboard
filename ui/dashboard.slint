@@ -1,0 +1,344 @@
+import { ScrollView } from "std-widgets.slint";
+
+export struct QuotaRow {
+    label: string,
+    value: string,
+    detail: string,
+    percent: float,
+    measured: bool,
+}
+
+export struct ToolCard {
+    name: string,
+    monogram: string,
+    accent: color,
+    source: string,
+    status: string,
+    activity: string,
+    activity-detail: string,
+    activity-expires-ms: float,
+    quotas: [QuotaRow],
+    fresh: bool,
+    expires-ms: float,
+    summary: string,
+}
+
+component Action inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <bool> selected: false;
+    in property <bool> light: false;
+    callback invoked();
+    width: 32px;
+    height: 28px;
+    border-radius: min(self.width, self.height) / 2;
+    background: touch.has-hover || root.selected ? (root.light ? #e0e9ec : #2c3940) : transparent;
+    Text {
+        text: root.label;
+        color: root.light ? #40535d : #b8c6ce;
+        font-size: 14px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea { clicked => { root.invoked(); } }
+    accessible-role: button;
+    accessible-label: hint;
+    accessible-action-default => { root.invoked(); }
+}
+
+component SettingRow inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <bool> checked;
+    in property <bool> light;
+    callback toggled(bool);
+    height: 68px;
+    HorizontalLayout {
+        spacing: 16px;
+        VerticalLayout {
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 5px;
+            Text { text: root.label; color: root.light ? #172c38 : #edf4f7; font-size: 13px; font-weight: 600; }
+            Text { text: root.detail; color: root.light ? #5d7480 : #8b9ea9; font-size: 11px; wrap: word-wrap; }
+        }
+        Rectangle {
+            width: 40px;
+            height: 22px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 11px;
+            background: root.checked ? #258773 : (root.light ? #c4d1d8 : #42535d);
+            Rectangle { x: root.checked ? 21px : 3px; y: 3px; width: 16px; height: 16px; border-radius: 8px; background: #ffffff; }
+        }
+    }
+    TouchArea { clicked => { root.toggled(!root.checked); } }
+    accessible-role: button;
+    accessible-label: root.label + (root.checked ? "，已开启" : "，已关闭");
+    accessible-action-default => { root.toggled(!root.checked); }
+}
+
+export component DashboardTray inherits SystemTrayIcon {
+    icon: @image-url("../assets/icon-32.png");
+    tooltip: "AI 工具看板";
+    in property <bool> autostart: false;
+    in property <bool> background-enabled: true;
+    callback show-dashboard();
+    callback hide-dashboard();
+    callback show-settings();
+    callback autostart-changed(bool);
+    callback background-changed(bool);
+    callback quit();
+    clicked => { root.show-dashboard(); }
+    Menu {
+        MenuItem { title: "显示看板"; activated => { root.show-dashboard(); } }
+        MenuItem { title: "收进托盘"; activated => { root.hide-dashboard(); } }
+        MenuSeparator {}
+        MenuItem { title: "开机启动"; checkable: true; checked: root.autostart; activated => { root.autostart-changed(!root.autostart); } }
+        MenuItem { title: "关闭后后台运行"; checkable: true; checked: root.background-enabled; activated => { root.background-changed(!root.background-enabled); } }
+        MenuItem { title: "设置…"; activated => { root.show-settings(); } }
+        MenuSeparator {}
+        MenuItem { title: "退出程序"; activated => { root.quit(); } }
+    }
+}
+
+export component Dashboard inherits Window {
+    title: "AI 工具看板";
+    icon: @image-url("../assets/icon.png");
+    width: root.compact ? 292px : 416px;
+    height: root.compact ? (max(2, root.tools.length) * 28 + 6) * 1px : root.full-height * 1px;
+    in property <int> full-height: 568;
+    no-frame: true;
+    background: root.light ? #f2f5f7 : #10191f;
+    default-font-family: "Microsoft YaHei UI";
+    default-font-size: 12px;
+    in-out property <bool> light: false;
+    in-out property <bool> compact: false;
+    in-out property <bool> pinned: true;
+    in-out property <bool> settings-open: false;
+    in-out property <bool> background-enabled: true;
+    in property <bool> autostart: false;
+    in property <string> settings-status: "设置会立即保存。";
+    in property <[ToolCard]> tools;
+    in property <string> checked: "正在检查本地来源…";
+    in property <bool> refreshing: true;
+    callback refresh();
+    callback drag-window();
+    callback pin-changed(bool);
+    callback display-mode-changed();
+    changed compact => { root.display-mode-changed(); }
+    callback minimize();
+    callback quit();
+    callback close-window();
+    callback hide-to-tray();
+    callback autostart-changed(bool);
+    callback background-changed(bool);
+    callback quota-expired(int);
+    callback activity-expired(int);
+    private property <color> ink: root.light ? #172c38 : #edf4f7;
+    private property <color> muted: root.light ? #5d7480 : #8b9ea9;
+    private property <color> line: root.light ? #dce4e9 : #2b3942;
+
+    // Keep expiry timers outside either layout so changing modes cannot reset freshness.
+    for tool[index] in root.tools: Rectangle {
+        width: 0px;
+        height: 0px;
+        Timer {
+            interval: tool.expires-ms * 1ms;
+            running: tool.fresh && tool.expires-ms > 0;
+            triggered => { root.quota-expired(index); }
+        }
+        Timer {
+            interval: tool.activity-expires-ms * 1ms;
+            running: tool.activity-expires-ms > 0;
+            triggered => { root.activity-expired(index); }
+        }
+    }
+
+    if root.compact: Rectangle {
+        border-radius: 8px;
+        clip: true;
+        border-width: 1px;
+        border-color: root.line;
+        HorizontalLayout {
+            padding: 4px;
+            spacing: 4px;
+            VerticalLayout {
+                spacing: 2px;
+                if root.tools.length == 0: Text { text: "正在读取剩余额度…"; color: root.muted; font-size: 11px; vertical-alignment: center; }
+                for tool in root.tools: Rectangle {
+                    height: 26px;
+                    border-radius: 13px;
+                    background: root.light ? #ffffff : #19252d;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 5px;
+                        Rectangle { width: 3px; height: 12px; y: 7px; border-radius: 2px; background: tool.fresh ? tool.accent : (root.light ? #89641b : #dfc184); }
+                        Text { text: tool.name; width: 46px; color: root.ink; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+                        Text { text: "▶" + tool.activity; width: 33px; color: tool.activity-expires-ms > 0 ? root.ink : root.muted; font-size: 10px; vertical-alignment: center; accessible-label: "进行中 " + tool.activity + " · " + tool.activity-detail; }
+                        Text { text: tool.summary; color: tool.fresh ? root.ink : (root.light ? #89641b : #dfc184); font-size: 11px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                    }
+                    TouchArea {
+                        mouse-cursor: move;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) { root.drag-window(); }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                width: 20px;
+                Action { light: root.light; label: "详"; hint: "展开完整看板"; width: 20px; height: 26px; y: 0px; invoked => { root.compact = false; } }
+                Action { light: root.light; label: "×"; hint: root.background-enabled ? "收进系统托盘" : "退出看板"; width: 20px; height: 26px; y: parent.height - self.height; invoked => { root.close-window(); } }
+            }
+        }
+    }
+
+    if !root.compact: Rectangle {
+        border-radius: 8px;
+        clip: true;
+        border-width: 1px;
+        border-color: root.line;
+        VerticalLayout {
+            padding: 18px;
+            spacing: 14px;
+            HorizontalLayout {
+                height: 40px;
+                spacing: 6px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        spacing: 3px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Image { source: @image-url("../assets/icon-32.png"); width: 22px; height: 22px; }
+                            Text { text: "AI 工具看板"; color: root.ink; font-size: 17px; font-weight: 700; }
+                        }
+                        Text { text: "AGENT / OVERVIEW"; color: root.muted; font-size: 9px; letter-spacing: 1.4px; }
+                    }
+                    TouchArea {
+                        mouse-cursor: move;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                root.drag-window();
+                            }
+                        }
+                    }
+                }
+                Action { light: root.light; label: root.light ? "深" : "浅"; hint: "切换深浅主题"; invoked => { root.light = !root.light; } }
+                Action { light: root.light; label: root.compact ? "详" : "简"; hint: "切换紧凑显示"; selected: root.compact; invoked => { root.compact = !root.compact; } }
+                Action { light: root.light; label: "顶"; hint: "切换窗口置顶"; selected: root.pinned; invoked => { root.pinned = !root.pinned; root.pin-changed(root.pinned); } }
+                Action { light: root.light; label: "−"; hint: "最小化到任务栏"; invoked => { root.minimize(); } }
+                Action { light: root.light; label: "×"; hint: root.background-enabled ? "收进系统托盘" : "退出看板"; invoked => { root.close-window(); } }
+            }
+            HorizontalLayout {
+                height: 18px;
+                spacing: 8px;
+                Rectangle { width: 5px; height: 5px; border-radius: 3px; background: #7fa89e; y: 6px; }
+                Text { text: "本机观测"; color: root.muted; font-size: 11px; }
+                Text { text: "只读来源 · 未知不计为零"; color: root.muted; font-size: 10px; horizontal-alignment: right; horizontal-stretch: 1; }
+            }
+            if root.settings-open: Rectangle {
+                vertical-stretch: 1;
+                background: root.light ? #ffffff : #19252d;
+                border-width: 1px;
+                border-color: root.line;
+                border-radius: 18px;
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 16px;
+                    HorizontalLayout {
+                        Text { text: "运行设置"; color: root.ink; font-size: 16px; font-weight: 600; }
+                        Action { light: root.light; label: "返回"; hint: "返回额度看板"; width: 40px; invoked => { root.settings-open = false; } }
+                    }
+                    SettingRow { light: root.light; label: "开机启动"; detail: "登录系统后自动在托盘运行"; checked: root.autostart; toggled(value) => { root.autostart-changed(value); } }
+                    Rectangle { height: 1px; background: root.line; }
+                    SettingRow { light: root.light; label: "关闭后后台运行"; detail: "关闭窗口后收进托盘，继续更新状态"; checked: root.background-enabled; toggled(value) => { root.background-changed(value); } }
+                    Text { text: root.settings-status; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                    Rectangle { vertical-stretch: 1; }
+                    Text { text: "右键托盘图标可显示看板或退出程序。\n移动程序后，请重新开启开机启动。"; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                    HorizontalLayout {
+                        Action { light: root.light; label: "后台运行"; hint: "隐藏窗口并保留系统托盘"; width: 92px; invoked => { root.hide-to-tray(); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        Action { light: root.light; label: "退出程序"; hint: "结束后台刷新并退出程序"; width: 80px; invoked => { root.quit(); } }
+                    }
+                }
+            }
+            if !root.settings-open: ScrollView {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                content-width: self.width;
+                VerticalLayout {
+                    spacing: 12px;
+                    if root.tools.length == 0: Text { text: "正在读取账号额度…"; color: root.muted; horizontal-alignment: center; vertical-alignment: center; min-height: 190px; }
+                    for tool[index] in root.tools: Rectangle {
+                        background: root.light ? #ffffff : #19252d;
+                        border-width: 1px;
+                        border-color: root.line;
+                        border-radius: 18px;
+                        VerticalLayout {
+                            padding: 16px;
+                            spacing: 14px;
+                            HorizontalLayout {
+                                height: 32px;
+                                spacing: 10px;
+                                Rectangle {
+                                    width: 32px;
+                                    height: 32px;
+                                    border-radius: 12px;
+                                    background: tool.accent.with-alpha(root.light ? 0.14 : 0.12);
+                                    Text { text: tool.monogram; color: tool.accent; font-size: 16px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    Text { text: tool.name; color: root.ink; font-size: 15px; font-weight: 600; }
+                                    Text { text: tool.source; color: root.muted; font-size: 10px; overflow: elide; }
+                                }
+                                Rectangle {
+                                    width: 48px;
+                                    height: 22px;
+                                    border-radius: 11px;
+                                    background: tool.fresh ? (root.light ? #e8f5f0 : #223c36) : (root.light ? #f7f0df : #3a3426);
+                                    Text { text: tool.status; color: tool.fresh ? (root.light ? #277b64 : #83d1b7) : (root.light ? #89641b : #dfc184); font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 7px;
+                                for quota in tool.quotas: VerticalLayout {
+                                    spacing: 7px;
+                                    HorizontalLayout {
+                                        Text { text: quota.label; color: root.muted; font-size: 11px; }
+                                        Text { text: quota.value; color: root.ink; font-size: 20px; font-weight: 600; horizontal-alignment: right; }
+                                    }
+                                    Rectangle {
+                                        height: 4px;
+                                        border-radius: 2px;
+                                        background: root.light ? #e8edf0 : #2c3a43;
+                                        if quota.measured: Rectangle { width: parent.width * quota.percent / 100; border-radius: 2px; background: tool.accent; }
+                                    }
+                                    Text { text: quota.detail; color: root.muted; font-size: 10px; }
+                                }
+                            }
+                            Rectangle { height: 1px; background: root.line; }
+                            HorizontalLayout {
+                                height: 24px;
+                                spacing: 7px;
+                                Text { text: "进行中"; color: root.muted; }
+                                Text { text: tool.activity; color: root.ink; font-size: 16px; font-weight: 600; }
+                                Text { text: tool.activity-detail; color: root.muted; font-size: 10px; horizontal-alignment: right; horizontal-stretch: 1; }
+                            }
+                        }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+            HorizontalLayout {
+                height: 24px;
+                Text { text: root.checked; color: root.muted; font-size: 10px; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                Action { light: root.light; label: "设置"; hint: "开机启动和后台运行设置"; width: 36px; selected: root.settings-open; invoked => { root.settings-open = !root.settings-open; } }
+                Action { light: root.light; label: "刷新"; hint: "重新检查本地来源"; invoked => { if !root.refreshing { root.refresh(); } } }
+            }
+        }
+    }
+}

@@ -1,0 +1,33 @@
+/target/
+/.tools/
+/artifacts/
+*.log
+
+# Machine-specific development instructions, reports and real-account screenshots
+/.codex/
+/AGENTS.md
+/docs/verification*.md
+/docs/source-audit.md
+/docs/*preview*.png
+
+# Private client state and credentials
+.env
+.env.*
+!.env.example
+auth.json
+credentials.json
+setting.json
+window.json
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.jsonl
+*.pem
+*.key
+
+# Build products; keep the application's reproducible dependency lock
+*.exe
+*.dll
+*.pdb
+!/Cargo.lock
